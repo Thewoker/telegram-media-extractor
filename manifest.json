@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Telegram Media Extractor",
+  "version": "1.6.0",
+  "description": "Extrae y descarga imágenes, videos, GIFs, stickers y audios de Telegram Web.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://web.telegram.org/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Telegram Media Extractor"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://web.telegram.org/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://web.telegram.org/*"
+      ],
+      "js": [
+        "page.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "minimum_chrome_version": "111"
+}
