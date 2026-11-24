@@ -294,7 +294,7 @@
       // misma lógica verificada que el backup: no da por hecha la descarga hasta que Chrome la recibe
       if (findNativeDownload() || (i > 8 && findViewerMedia())) {
         const how = await backupCurrent(mid || Date.now());
-        console.log("[TME v1.6] individual ok:", how);
+        console.log("[TME v1.9] individual ok:", how);
         return how;
       }
       const m = findViewerMedia();
@@ -337,8 +337,16 @@
         if (!s) throw new Error("Reproducí el audio una vez y volvé a tocar ⬇");
         await download({ url: s, type: "audio", mid });
       } else {
-        await downloadViaViewer(hit.holder, mid, wasOpen, hit.isVideoBox || el.tagName === "VIDEO");
-        if (!wasOpen) { await sleep(400); closeViewer(); }
+        try {
+          await downloadViaViewer(hit.holder, mid, wasOpen, hit.isVideoBox || el.tagName === "VIDEO");
+          if (!wasOpen) { await sleep(400); closeViewer(); }
+        } catch (viewerErr) {
+          // Último recurso: clic derecho en el mensaje → "Descargar" (no depende del reproductor)
+          console.warn("[TME] el visor falló, pruebo menú contextual:", viewerErr.message);
+          if (viewerOpen()) { closeViewer(); await sleep(500); }
+          try { await downloadViaContextMenu(hit.holder); }
+          catch (menuErr) { throw new Error(viewerErr.message + " || menú: " + menuErr.message); }
+        }
       }
       btn.textContent = "✓";
       if (!backup?.running) setPanel("", false);
@@ -346,7 +354,8 @@
       console.error("[TME] individual ERROR:", err);
       btn.textContent = "✕";
       btn.title = String(err.message || err);
-      setPanel("No se pudo descargar: " + (err.message || err));
+      const em = String(err.message || err);
+      setPanel("No se pudo descargar: " + em);
       setTimeout(() => !backup?.running && setPanel("", false), 8000);
     }
     setTimeout(() => { btn.textContent = "⬇"; btn.title = "Descargar"; }, 2000);
@@ -410,16 +419,32 @@
   }
 
   // Espera a que el video del visor tenga una URL utilizable (Telegram la asigna al empezar a reproducir)
+  // Videos que Telegram no reproduce por partes se bajan enteros antes de mostrarse: hasta 90 s
   async function viewerVideoSrc() {
-    for (let i = 0; i < 40; i++) {
-      const v = activeVideo();
-      if (!v) return "";
+    const t0 = Date.now();
+    let played = false;
+    while (Date.now() - t0 < 90000 && viewerOpen()) {
+      const v = activeVideo(); // puede desmontarse y volver a montarse: no abandonar
       const s = srcOf(v);
       if (s && !s.startsWith("data:")) return s;
-      if (i === 5) v.play?.().catch(() => {});
-      await sleep(250);
+      if (v && !played && Date.now() - t0 > 1200) { played = true; v.play?.().catch(() => {}); }
+      const secs = Math.round((Date.now() - t0) / 1000);
+      if (secs >= 3 && typeof setPanel === "function") {
+        const pct = viewerOpen()?.querySelector("[class*='progress'], [class*='Progress']")?.textContent?.trim() || "";
+        setPanel(`Esperando que Telegram cargue el video… ${secs}s ${pct}`);
+      }
+      await sleep(300);
     }
     return "";
+  }
+
+  function viewerDiag() {
+    const v = viewerOpen();
+    if (!v) return "visor cerrado";
+    const vids = [...v.querySelectorAll("video")].map((x) => (x.currentSrc || x.src || "SIN-SRC").slice(0, 50) + "@" + Math.round(x.getBoundingClientRect().width));
+    const btns = [...v.querySelectorAll("button, [role='button']")].map((b) => b.getAttribute("aria-label") || b.title || String(b.className).split(" ")[0]).filter(Boolean).slice(0, 12);
+    const spinner = !!v.querySelector("[class*='spinner'], [class*='Spinner'], [class*='loading'], [class*='progress']");
+    return "videos=" + JSON.stringify(vids) + " botones=" + JSON.stringify(btns) + " cargando=" + spinner;
   }
 
   // Descarga el medio actual del visor, verificando que la descarga realmente ocurra
@@ -459,7 +484,8 @@
     }
 
     // 2) Botón nativo de Telegram, verificando que Chrome reciba el archivo
-    const nat = findNativeDownload();
+    let nat = findNativeDownload();
+    for (let i = 0; i < 10 && !nat; i++) { await sleep(300); nat = findNativeDownload(); }
     if (nat) {
       const t0 = Date.now();
       nat.click();
@@ -475,8 +501,37 @@
     }
 
     throw new Error((isVideo ? "no se pudo bajar el video" : "no se pudo bajar la imagen") +
-      " [v1.6 | url=" + location.pathname + " | directa=" + (directErr || "-") +
-      " | nativo=" + (nat ? "sin respuesta" : "NO ENCONTRADO") + "]");
+      " [v1.9 | url=" + location.pathname + " | directa=" + (directErr || "-") +
+      " | nativo=" + (nat ? "sin respuesta" : "NO ENCONTRADO") + " | " + viewerDiag() + "]");
+  }
+
+  // Clic derecho sobre el mensaje y opción "Descargar" del menú de Telegram
+  async function downloadViaContextMenu(holder) {
+    const target = holder.querySelector?.("img, video, canvas") || holder;
+    const r = target.getBoundingClientRect();
+    const opts = { bubbles: true, cancelable: true, view: window, button: 2, buttons: 2,
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+    target.dispatchEvent(new MouseEvent("mousedown", opts));
+    target.dispatchEvent(new MouseEvent("contextmenu", opts));
+    let item = null, menu = null;
+    for (let i = 0; i < 20 && !item; i++) {
+      await sleep(150);
+      menu = document.querySelector(".MessageContextMenu, .ContextMenu .bubble.open, [role='menu'], .btn-menu.active, .contextmenu");
+      item = menu && [...menu.querySelectorAll("[role='menuitem'], .MenuItem, .btn-menu-item, button, div")]
+        .find((x) => x.children.length <= 3 && /^s*(download|descargar|guardar|save to downloads)/i.test(x.textContent || ""));
+    }
+    if (!item) {
+      const opciones = menu ? [...menu.querySelectorAll("[role='menuitem'], .MenuItem, .btn-menu-item")].map((x) => x.textContent.trim()).slice(0, 15) : [];
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+      throw new Error(menu ? "el menú no tiene 'Descargar' " + JSON.stringify(opciones) : "no se abrió el menú contextual");
+    }
+    const t0 = Date.now();
+    item.click();
+    setPanel("Telegram está bajando el archivo… (hasta 2 min)");
+    const d = await downloadStartedSince(t0, 120000);
+    if (!d) throw new Error("se eligió 'Descargar' pero Chrome no recibió nada en 2 min");
+    console.log("[TME v1.9] individual ok: menú contextual", d.name);
+    return "menú";
   }
 
   async function runBackup() {
